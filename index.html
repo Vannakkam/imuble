@@ -66,13 +66,13 @@
                 <tr>
                     <th>Seq</th>
                     <th>Time (ms)</th>
-                    <th>Acc X</th>
-                    <th>Acc Y</th>
-                    <th>Acc Z</th>
-                    <th>Temp</th>
-                    <th>Gyro X</th>
-                    <th>Gyro Y</th>
-                    <th>Gyro Z</th>
+                    <th>Acc X (g)</th>
+                    <th>Acc Y (g)</th>
+                    <th>Acc Z (g)</th>
+                    <th>Temp (°C)</th>
+                    <th>Gyro X (°/s)</th>
+                    <th>Gyro Y (°/s)</th>
+                    <th>Gyro Z (°/s)</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -105,7 +105,7 @@
         btnConnect.addEventListener('click', connect);
         btnStart.addEventListener('click', () => sendCommand('START'));
         btnStop.addEventListener('click', () => sendCommand('STOP'));
-        btnReset.addEventListener('click', resetData); // Changed to resetData function
+        btnReset.addEventListener('click', resetData);
         btnDownload.addEventListener('click', downloadCSV);
 
         async function connect() {
@@ -153,27 +153,21 @@
             }
         }
 
-        // --- NEW RESET FUNCTION ---
         function resetData() {
-            // 1. Clear local data variables
             dataBuffer = [];
             packetCount = 0;
             lostPackets = 0;
             expectedSeq = 0;
             isFirstPacket = true;
             
-            // 2. Clear UI table
             tbody.innerHTML = '';
             
-            // 3. Update stats display
             document.getElementById('statPackets').innerText = '0';
             document.getElementById('statLost').innerText = '0';
             document.getElementById('statBuffer').innerText = '0';
             
-            // 4. Disable download button
             btnDownload.disabled = true;
             
-            // 5. Tell MCU to reset its sequence number (without restarting BLE)
             if (device && device.gatt && device.gatt.connected) {
                 sendCommand('RESET');
             }
@@ -187,16 +181,32 @@
 
             const view = new DataView(value.buffer);
             
+            // 1. Parse raw binary data
             const seq       = view.getUint16(0, true);
             const timestamp = view.getUint32(2, true);
-            const ax        = view.getInt16(6, true);
-            const ay        = view.getInt16(8, true);
-            const az        = view.getInt16(10, true);
-            const temp      = view.getInt16(12, true);
-            const gx        = view.getInt16(14, true);
-            const gy        = view.getInt16(16, true);
-            const gz        = view.getInt16(18, true);
+            const ax_raw    = view.getInt16(6, true);
+            const ay_raw    = view.getInt16(8, true);
+            const az_raw    = view.getInt16(10, true);
+            const temp_raw  = view.getInt16(12, true);
+            const gx_raw    = view.getInt16(14, true);
+            const gy_raw    = view.getInt16(16, true);
+            const gz_raw    = view.getInt16(18, true);
 
+            // 2. Convert raw values to actual physical units
+            // Accel: 16384 LSB/g (for ±2g range)
+            const ax = Number((ax_raw / 16384.0).toFixed(3)); 
+            const ay = Number((ay_raw / 16384.0).toFixed(3)); 
+            const az = Number((az_raw / 16384.0).toFixed(3)); 
+            
+            // Temp: (Raw / 340) + 36.53
+            const temp = Number(((temp_raw / 340.0) + 36.53).toFixed(2)); 
+            
+            // Gyro: 131 LSB/°/s (for ±250°/s range)
+            const gx = Number((gx_raw / 131.0).toFixed(2)); 
+            const gy = Number((gy_raw / 131.0).toFixed(2)); 
+            const gz = Number((gz_raw / 131.0).toFixed(2)); 
+
+            // 3. Handle Packet Loss
             if (isFirstPacket) {
                 expectedSeq = (seq + 1) & 0xFFFF;
                 isFirstPacket = false;
@@ -232,19 +242,17 @@
             btnDownload.disabled = false; 
         }
 
-        // --- FIXED DOWNLOAD FUNCTION (No more freezing) ---
         function downloadCSV() {
             if (dataBuffer.length === 0) return;
 
-            const header = "Sequence,Timestamp_ms,AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ\n";
+            // Updated header to reflect physical units
+            const header = "Sequence,Timestamp_ms,AccX_g,AccY_g,AccZ_g,Temp_C,GyroX_dps,GyroY_dps,GyroZ_dps\n";
             const blobParts = [header];
             
-            // Efficiently build blob parts without massive string concatenation
             for (let i = 0; i < dataBuffer.length; i++) {
                 blobParts.push(dataBuffer[i].join(",") + "\n");
             }
             
-            // Create blob directly from array of strings
             const blob = new Blob(blobParts, { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             
@@ -263,7 +271,6 @@
             btnConnect.innerText = connected ? "Connected" : "Connect to XIAO";
             btnStart.disabled = !connected;
             btnStop.disabled = !connected;
-            // Allow reset if connected OR if we have local data to clear
             btnReset.disabled = !connected && dataBuffer.length === 0;
             btnDownload.disabled = dataBuffer.length === 0; 
         }
