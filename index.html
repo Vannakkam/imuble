@@ -33,7 +33,7 @@
 </head>
 <body>
 
-    <h1>MPU6050 BLE Data Logger</h1>
+    <h1>MPU6050 BLE Data Logger (High-Efficiency Batch)</h1>
     
     <div id="status">Status: Disconnected</div>
 
@@ -47,11 +47,11 @@
 
     <div class="stats">
         <div class="stat-box">
-            <div class="stat-label">Packets Received</div>
+            <div class="stat-label">Samples Received</div>
             <div class="stat-value" id="statPackets">0</div>
         </div>
         <div class="stat-box">
-            <div class="stat-label">Packets Lost</div>
+            <div class="stat-label">Samples Lost</div>
             <div class="stat-value lost" id="statLost">0</div>
         </div>
         <div class="stat-box">
@@ -80,7 +80,6 @@
     </div>
 
     <script>
-        // BLE UUIDs matching the Arduino Sketch
         const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
         const CMD_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
         const DATA_CHAR_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
@@ -93,7 +92,6 @@
         let expectedSeq = 0;
         let isFirstPacket = true;
 
-        // UI Elements
         const btnConnect = document.getElementById('btnConnect');
         const btnStart = document.getElementById('btnStart');
         const btnStop = document.getElementById('btnStop');
@@ -111,7 +109,6 @@
         async function connect() {
             try {
                 statusText.innerText = "Status: Scanning...";
-                
                 device = await navigator.bluetooth.requestDevice({
                     filters: [{ namePrefix: 'XIAO' }], 
                     optionalServices: [SERVICE_UUID] 
@@ -147,9 +144,7 @@
                 try {
                     const encoder = new TextEncoder();
                     await cmdChar.writeValue(encoder.encode(cmd));
-                } catch (e) {
-                    console.error("Command failed", e);
-                }
+                } catch (e) { console.error("Command failed", e); }
             }
         }
 
@@ -159,62 +154,32 @@
             lostPackets = 0;
             expectedSeq = 0;
             isFirstPacket = true;
-            
             tbody.innerHTML = '';
             
             document.getElementById('statPackets').innerText = '0';
             document.getElementById('statLost').innerText = '0';
             document.getElementById('statBuffer').innerText = '0';
-            
             btnDownload.disabled = true;
             
-            if (device && device.gatt && device.gatt.connected) {
-                sendCommand('RESET');
-            }
-            
+            if (device && device.gatt && device.gatt.connected) sendCommand('RESET');
             statusText.innerText = "Status: Data Cleared & Ready";
         }
 
-        function handleData(event) {
-            const value = event.target.value;
-            if (value.byteLength !== 20) return; 
-
-            const view = new DataView(value.buffer);
-            
-            // 1. Parse raw binary data
-            const seq       = view.getUint16(0, true);
-            const timestamp = view.getUint32(2, true);
-            const ax_raw    = view.getInt16(6, true);
-            const ay_raw    = view.getInt16(8, true);
-            const az_raw    = view.getInt16(10, true);
-            const temp_raw  = view.getInt16(12, true);
-            const gx_raw    = view.getInt16(14, true);
-            const gy_raw    = view.getInt16(16, true);
-            const gz_raw    = view.getInt16(18, true);
-
-            // 2. Convert raw values to actual physical units
-            // Accel: 16384 LSB/g (for ±2g range)
+        function processSample(seq, timestamp, ax_raw, ay_raw, az_raw, temp_raw, gx_raw, gy_raw, gz_raw) {
             const ax = Number((ax_raw / 16384.0).toFixed(3)); 
             const ay = Number((ay_raw / 16384.0).toFixed(3)); 
             const az = Number((az_raw / 16384.0).toFixed(3)); 
-            
-            // Temp: (Raw / 340) + 36.53
             const temp = Number(((temp_raw / 340.0) + 36.53).toFixed(2)); 
-            
-            // Gyro: 131 LSB/°/s (for ±250°/s range)
             const gx = Number((gx_raw / 131.0).toFixed(2)); 
             const gy = Number((gy_raw / 131.0).toFixed(2)); 
             const gz = Number((gz_raw / 131.0).toFixed(2)); 
 
-            // 3. Handle Packet Loss
             if (isFirstPacket) {
                 expectedSeq = (seq + 1) & 0xFFFF;
                 isFirstPacket = false;
             } else {
                 let diff = (seq - expectedSeq) & 0xFFFF;
-                if (diff > 0) {
-                    lostPackets += diff;
-                }
+                if (diff > 0) lostPackets += diff;
                 expectedSeq = (seq + 1) & 0xFFFF;
             }
 
@@ -222,9 +187,7 @@
             const row = [seq, timestamp, ax, ay, az, temp, gx, gy, gz];
             dataBuffer.push(row);
             
-            if (tbody.children.length > 50) {
-                tbody.removeChild(tbody.firstChild);
-            }
+            if (tbody.children.length > 50) tbody.removeChild(tbody.firstChild);
             
             const tr = document.createElement('tr');
             row.forEach(val => {
@@ -234,18 +197,46 @@
             });
             tbody.appendChild(tr);
             tbody.parentElement.scrollTop = tbody.parentElement.scrollHeight;
+        }
+
+        // --- DYNAMIC BATCH PARSER ---
+        function handleData(event) {
+            const value = event.target.value;
+            const sampleCount = value.byteLength / 20;
+            
+            // Ensure payload is a valid multiple of 20 bytes
+            if (value.byteLength % 20 !== 0 || sampleCount === 0) {
+                console.warn("Invalid payload size:", value.byteLength);
+                return; 
+            }
+
+            const view = new DataView(value.buffer);
+            
+            // Loop through all samples in the batch
+            for (let i = 0; i < sampleCount; i++) {
+                const offset = i * 20;
+                const seq = view.getUint16(offset, true);
+                const ts = view.getUint32(offset + 2, true);
+                const ax = view.getInt16(offset + 6, true);
+                const ay = view.getInt16(offset + 8, true);
+                const az = view.getInt16(offset + 10, true);
+                const temp = view.getInt16(offset + 12, true);
+                const gx = view.getInt16(offset + 14, true);
+                const gy = view.getInt16(offset + 16, true);
+                const gz = view.getInt16(offset + 18, true);
+
+                processSample(seq, ts, ax, ay, az, temp, gx, gy, gz);
+            }
 
             document.getElementById('statPackets').innerText = packetCount;
             document.getElementById('statLost').innerText = lostPackets;
             document.getElementById('statBuffer').innerText = dataBuffer.length;
-            
             btnDownload.disabled = false; 
         }
 
         function downloadCSV() {
             if (dataBuffer.length === 0) return;
 
-            // Updated header to reflect physical units
             const header = "Sequence,Timestamp_ms,AccX_g,AccY_g,AccZ_g,Temp_C,GyroX_dps,GyroY_dps,GyroZ_dps\n";
             const blobParts = [header];
             
