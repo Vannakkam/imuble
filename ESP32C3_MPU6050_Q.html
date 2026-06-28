@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XIAO ESP32-C3 IMU Logger</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px; background: #f9f9f9; color: #333; }
+        h1 { text-align: center; color: #2c3e50; }
+        .controls { margin-bottom: 20px; padding: 15px; background: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; flex-wrap: wrap; gap: 10px; align-items: center;}
+        button { padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; transition: opacity 0.2s; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #btnConnect { background: #3498db; }
+        #btnStart { background: #2ecc71; }
+        #btnStop { background: #e74c3c; }
+        #btnReset { background: #f39c12; }
+        #btnDownload { background: #9b59b6; }
+        
+        .stats { display: flex; gap: 20px; margin-bottom: 20px; font-weight: bold; }
+        .stat-box { padding: 10px 15px; background: #fff; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .stat-label { font-size: 0.8em; color: #7f8c8d; }
+        .stat-value { font-size: 1.2em; color: #2c3e50; }
+        .lost { color: #e74c3c; }
+
+        #status { margin-bottom: 15px; font-style: italic; color: #7f8c8d; }
+        
+        .table-container { max-height: 400px; overflow-y: auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; text-align: right; border-bottom: 1px solid #eee; font-family: monospace; }
+        th { background: #ecf0f1; position: sticky; top: 0; text-align: right; }
+        tr:hover { background: #f1f2f6; }
+    </style>
+</head>
+<body>
+
+    <h1>MPU6050 BLE Data Logger</h1>
+    
+    <div id="status">Status: Disconnected</div>
+
+    <div class="controls">
+        <button id="btnConnect">Connect to XIAO</button>
+        <button id="btnStart" disabled>Start Recording</button>
+        <button id="btnStop" disabled>Stop Recording</button>
+        <button id="btnReset" disabled>Reset MCU</button>
+        <button id="btnDownload" disabled>Download CSV</button>
+    </div>
+
+    <div class="stats">
+        <div class="stat-box">
+            <div class="stat-label">Packets Received</div>
+            <div class="stat-value" id="statPackets">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Packets Lost</div>
+            <div class="stat-value lost" id="statLost">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Buffer Size</div>
+            <div class="stat-value" id="statBuffer">0</div>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table id="dataTable">
+            <thead>
+                <tr>
+                    <th>Seq</th>
+                    <th>Time (ms)</th>
+                    <th>Acc X</th>
+                    <th>Acc Y</th>
+                    <th>Acc Z</th>
+                    <th>Temp</th>
+                    <th>Gyro X</th>
+                    <th>Gyro Y</th>
+                    <th>Gyro Z</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <script>
+        // BLE UUIDs matching the Arduino Sketch
+        const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+        const CMD_CHAR_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+        const DATA_CHAR_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+
+        let device, server, cmdChar, dataChar;
+        let dataBuffer = [];
+        
+        let packetCount = 0;
+        let lostPackets = 0;
+        let expectedSeq = 0;
+        let isFirstPacket = true;
+
+        // UI Elements
+        const btnConnect = document.getElementById('btnConnect');
+        const btnStart = document.getElementById('btnStart');
+        const btnStop = document.getElementById('btnStop');
+        const btnReset = document.getElementById('btnReset');
+        const btnDownload = document.getElementById('btnDownload');
+        const statusText = document.getElementById('status');
+        const tbody = document.querySelector('#dataTable tbody');
+
+        btnConnect.addEventListener('click', connect);
+        btnStart.addEventListener('click', () => sendCommand('START'));
+        btnStop.addEventListener('click', () => sendCommand('STOP'));
+        btnReset.addEventListener('click', () => sendCommand('RESET'));
+        btnDownload.addEventListener('click', downloadCSV);
+
+        async function connect() {
+            try {
+                statusText.innerText = "Status: Scanning...";
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'XIAO' }] // Matches "XIAO_C3_IMU"
+                });
+                
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+                
+                statusText.innerText = "Status: Connecting...";
+                server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                
+                cmdChar = await service.getCharacteristic(CMD_CHAR_UUID);
+                dataChar = await service.getCharacteristic(DATA_CHAR_UUID);
+                
+                await dataChar.startNotifications();
+                dataChar.addEventListener('characteristicvaluechanged', handleData);
+                
+                updateUI(true);
+                statusText.innerText = "Status: Connected & Ready";
+            } catch (error) {
+                console.error(error);
+                statusText.innerText = "Status: Error - " + error.message;
+            }
+        }
+
+        function onDisconnected() {
+            updateUI(false);
+            statusText.innerText = "Status: Disconnected";
+        }
+
+        async function sendCommand(cmd) {
+            if (cmdChar) {
+                try {
+                    const encoder = new TextEncoder();
+                    await cmdChar.writeValue(encoder.encode(cmd));
+                } catch (e) {
+                    console.error("Command failed", e);
+                }
+            }
+        }
+
+        function handleData(event) {
+            const value = event.target.value;
+            if (value.byteLength !== 20) return; // Ensure correct payload size
+
+            const view = new DataView(value.buffer);
+            
+            // Parse Binary Data (Little Endian = true)
+            const seq       = view.getUint16(0, true);
+            const timestamp = view.getUint32(2, true);
+            const ax        = view.getInt16(6, true);
+            const ay        = view.getInt16(8, true);
+            const az        = view.getInt16(10, true);
+            const temp      = view.getInt16(12, true);
+            const gx        = view.getInt16(14, true);
+            const gy        = view.getInt16(16, true);
+            const gz        = view.getInt16(18, true);
+
+            // Calculate Packet Loss (Handling 16-bit wrap-around)
+            if (isFirstPacket) {
+                expectedSeq = (seq + 1) & 0xFFFF;
+                isFirstPacket = false;
+            } else {
+                let diff = (seq - expectedSeq) & 0xFFFF;
+                if (diff > 0) {
+                    lostPackets += diff;
+                }
+                expectedSeq = (seq + 1) & 0xFFFF;
+            }
+
+            packetCount++;
+            const row = [seq, timestamp, ax, ay, az, temp, gx, gy, gz];
+            dataBuffer.push(row);
+            
+            // Update Live Table (Keep max 50 rows in DOM for performance)
+            if (tbody.children.length > 50) {
+                tbody.removeChild(tbody.firstChild);
+            }
+            
+            const tr = document.createElement('tr');
+            row.forEach(val => {
+                const td = document.createElement('td');
+                td.textContent = val;
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+            tbody.parentElement.scrollTop = tbody.parentElement.scrollHeight;
+
+            // Update Stats
+            document.getElementById('statPackets').innerText = packetCount;
+            document.getElementById('statLost').innerText = lostPackets;
+            document.getElementById('statBuffer').innerText = dataBuffer.length;
+        }
+
+        function downloadCSV() {
+            if (dataBuffer.length === 0) return;
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "Sequence,Timestamp_ms,AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ\n";
+            
+            dataBuffer.forEach(row => {
+                csvContent += row.join(",") + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `imu_data_${new Date().getTime()}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function updateUI(connected) {
+            btnConnect.innerText = connected ? "Connected" : "Connect to XIAO";
+            btnStart.disabled = !connected;
+            btnStop.disabled = !connected;
+            btnReset.disabled = !connected;
+            btnDownload.disabled = !connected || dataBuffer.length === 0;
+        }
+    </script>
+</body>
+</html>
