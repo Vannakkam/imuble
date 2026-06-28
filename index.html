@@ -41,7 +41,7 @@
         <button id="btnConnect">Connect to XIAO</button>
         <button id="btnStart" disabled>Start Recording</button>
         <button id="btnStop" disabled>Stop Recording</button>
-        <button id="btnReset" disabled>Reset MCU</button>
+        <button id="btnReset" disabled>Reset / Clear Data</button>
         <button id="btnDownload" disabled>Download CSV</button>
     </div>
 
@@ -105,7 +105,7 @@
         btnConnect.addEventListener('click', connect);
         btnStart.addEventListener('click', () => sendCommand('START'));
         btnStop.addEventListener('click', () => sendCommand('STOP'));
-        btnReset.addEventListener('click', () => sendCommand('RESET'));
+        btnReset.addEventListener('click', resetData); // Changed to resetData function
         btnDownload.addEventListener('click', downloadCSV);
 
         async function connect() {
@@ -151,6 +151,34 @@
                     console.error("Command failed", e);
                 }
             }
+        }
+
+        // --- NEW RESET FUNCTION ---
+        function resetData() {
+            // 1. Clear local data variables
+            dataBuffer = [];
+            packetCount = 0;
+            lostPackets = 0;
+            expectedSeq = 0;
+            isFirstPacket = true;
+            
+            // 2. Clear UI table
+            tbody.innerHTML = '';
+            
+            // 3. Update stats display
+            document.getElementById('statPackets').innerText = '0';
+            document.getElementById('statLost').innerText = '0';
+            document.getElementById('statBuffer').innerText = '0';
+            
+            // 4. Disable download button
+            btnDownload.disabled = true;
+            
+            // 5. Tell MCU to reset its sequence number (without restarting BLE)
+            if (device && device.gatt && device.gatt.connected) {
+                sendCommand('RESET');
+            }
+            
+            statusText.innerText = "Status: Data Cleared & Ready";
         }
 
         function handleData(event) {
@@ -201,22 +229,23 @@
             document.getElementById('statLost').innerText = lostPackets;
             document.getElementById('statBuffer').innerText = dataBuffer.length;
             
-            // Enable download button as soon as data arrives
             btnDownload.disabled = false; 
         }
 
-        // --- FIXED DOWNLOAD FUNCTION ---
+        // --- FIXED DOWNLOAD FUNCTION (No more freezing) ---
         function downloadCSV() {
             if (dataBuffer.length === 0) return;
 
-            let csvContent = "Sequence,Timestamp_ms,AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ\n";
+            const header = "Sequence,Timestamp_ms,AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ\n";
+            const blobParts = [header];
             
-            dataBuffer.forEach(row => {
-                csvContent += row.join(",") + "\n";
-            });
-
-            // Use Blob API to avoid URL length limits
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            // Efficiently build blob parts without massive string concatenation
+            for (let i = 0; i < dataBuffer.length; i++) {
+                blobParts.push(dataBuffer[i].join(",") + "\n");
+            }
+            
+            // Create blob directly from array of strings
+            const blob = new Blob(blobParts, { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             
             const link = document.createElement("a");
@@ -227,8 +256,6 @@
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
-            // Free up memory
             URL.revokeObjectURL(url);
         }
 
@@ -236,8 +263,8 @@
             btnConnect.innerText = connected ? "Connected" : "Connect to XIAO";
             btnStart.disabled = !connected;
             btnStop.disabled = !connected;
-            btnReset.disabled = !connected;
-            // Download stays enabled if we have data, even if disconnected
+            // Allow reset if connected OR if we have local data to clear
+            btnReset.disabled = !connected && dataBuffer.length === 0;
             btnDownload.disabled = dataBuffer.length === 0; 
         }
     </script>
