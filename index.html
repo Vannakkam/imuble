@@ -111,8 +111,12 @@
         async function connect() {
             try {
                 statusText.innerText = "Status: Scanning...";
+                
+                // --- FIX APPLIED HERE ---
+                // Added 'optionalServices' to explicitly grant permission to access our custom SERVICE_UUID
                 device = await navigator.bluetooth.requestDevice({
-                    filters: [{ namePrefix: 'XIAO' }] // Matches "XIAO_C3_IMU"
+                    filters: [{ namePrefix: 'XIAO' }], // Matches "XIAO_C3_IMU"
+                    optionalServices: [SERVICE_UUID]    // <--- REQUIRED FOR CUSTOM UUIDs
                 });
                 
                 device.addEventListener('gattserverdisconnected', onDisconnected);
