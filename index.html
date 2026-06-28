@@ -112,11 +112,9 @@
             try {
                 statusText.innerText = "Status: Scanning...";
                 
-                // --- FIX APPLIED HERE ---
-                // Added 'optionalServices' to explicitly grant permission to access our custom SERVICE_UUID
                 device = await navigator.bluetooth.requestDevice({
-                    filters: [{ namePrefix: 'XIAO' }], // Matches "XIAO_C3_IMU"
-                    optionalServices: [SERVICE_UUID]    // <--- REQUIRED FOR CUSTOM UUIDs
+                    filters: [{ namePrefix: 'XIAO' }], 
+                    optionalServices: [SERVICE_UUID] 
                 });
                 
                 device.addEventListener('gattserverdisconnected', onDisconnected);
@@ -157,11 +155,10 @@
 
         function handleData(event) {
             const value = event.target.value;
-            if (value.byteLength !== 20) return; // Ensure correct payload size
+            if (value.byteLength !== 20) return; 
 
             const view = new DataView(value.buffer);
             
-            // Parse Binary Data (Little Endian = true)
             const seq       = view.getUint16(0, true);
             const timestamp = view.getUint32(2, true);
             const ax        = view.getInt16(6, true);
@@ -172,7 +169,6 @@
             const gy        = view.getInt16(16, true);
             const gz        = view.getInt16(18, true);
 
-            // Calculate Packet Loss (Handling 16-bit wrap-around)
             if (isFirstPacket) {
                 expectedSeq = (seq + 1) & 0xFFFF;
                 isFirstPacket = false;
@@ -188,7 +184,6 @@
             const row = [seq, timestamp, ax, ay, az, temp, gx, gy, gz];
             dataBuffer.push(row);
             
-            // Update Live Table (Keep max 50 rows in DOM for performance)
             if (tbody.children.length > 50) {
                 tbody.removeChild(tbody.firstChild);
             }
@@ -202,29 +197,39 @@
             tbody.appendChild(tr);
             tbody.parentElement.scrollTop = tbody.parentElement.scrollHeight;
 
-            // Update Stats
             document.getElementById('statPackets').innerText = packetCount;
             document.getElementById('statLost').innerText = lostPackets;
             document.getElementById('statBuffer').innerText = dataBuffer.length;
+            
+            // Enable download button as soon as data arrives
+            btnDownload.disabled = false; 
         }
 
+        // --- FIXED DOWNLOAD FUNCTION ---
         function downloadCSV() {
             if (dataBuffer.length === 0) return;
 
-            let csvContent = "data:text/csv;charset=utf-8,";
-            csvContent += "Sequence,Timestamp_ms,AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ\n";
+            let csvContent = "Sequence,Timestamp_ms,AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ\n";
             
             dataBuffer.forEach(row => {
                 csvContent += row.join(",") + "\n";
             });
 
-            const encodedUri = encodeURI(csvContent);
+            // Use Blob API to avoid URL length limits
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            
             const link = document.createElement("a");
-            link.setAttribute("href", encodedUri);
+            link.setAttribute("href", url);
             link.setAttribute("download", `imu_data_${new Date().getTime()}.csv`);
+            link.style.visibility = 'hidden';
+            
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+            
+            // Free up memory
+            URL.revokeObjectURL(url);
         }
 
         function updateUI(connected) {
@@ -232,7 +237,8 @@
             btnStart.disabled = !connected;
             btnStop.disabled = !connected;
             btnReset.disabled = !connected;
-            btnDownload.disabled = !connected || dataBuffer.length === 0;
+            // Download stays enabled if we have data, even if disconnected
+            btnDownload.disabled = dataBuffer.length === 0; 
         }
     </script>
 </body>
