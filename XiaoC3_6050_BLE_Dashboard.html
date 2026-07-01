@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>IMU BLE Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --accent: #4f8cff;
+    --good: #3ecf8e;
+    --bad: #ff5c5c;
+    --text: #e6e9ef;
+    --muted: #8a91a3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    max-width: 760px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+
+  .stat { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.95rem; }
+  .stat .val { font-weight: 600; }
+  .val.bad { color: var(--bad); }
+  .val.good { color: var(--good); }
+
+  .btns { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+  button {
+    flex: 1 1 auto;
+    min-width: 130px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #20242e;
+    color: var(--text);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: #2a2f3c; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: #3a1f24; border-color: #5a2a30; color: #ff9a9a; }
+
+  #connDot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--bad); margin-right: 6px;
+  }
+  #connDot.on { background: var(--good); }
+
+  .log {
+    grid-column: 1 / -1;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    color: var(--muted);
+    max-height: 140px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<h1>IMU BLE Dashboard</h1>
+<div class="sub">XIAO ESP32C3 + MPU6050 &middot; 200&nbsp;Hz &middot; Web Bluetooth</div>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>Connection</h2>
+    <div class="stat"><span><span id="connDot"></span>Status</span><span class="val" id="connStatus">Disconnected</span></div>
+    <div class="stat"><span>Recording</span><span class="val" id="recStatus">No</span></div>
+    <div class="btns" style="margin-top:12px;">
+      <button id="btnConnect" class="primary">Connect to IMU</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Live Stats</h2>
+    <div class="stat"><span>Rows received</span><span class="val" id="rowsReceived">0</span></div>
+    <div class="stat"><span>Rows lost</span><span class="val" id="rowsLost">0</span></div>
+    <div class="stat"><span>Loss rate</span><span class="val" id="lossRate">0.00%</span></div>
+    <div class="stat"><span>Last IMU temp</span><span class="val" id="lastTemp">&mdash;</span></div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Controls</h2>
+    <div class="btns">
+      <button id="btnReset" disabled>Reset Data</button>
+      <button id="btnStart" class="primary" disabled>Start Recording</button>
+      <button id="btnStop" class="danger" disabled>Stop Recording</button>
+      <button id="btnDownload" disabled>Download CSV</button>
+    </div>
+  </div>
+
+  <div class="panel log" id="log"></div>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------
+// Must match the UUIDs and packet layout in imu_ble_streamer.ino
+// ---------------------------------------------------------------------
+const SERVICE_UUID    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const DATA_CHAR_UUID   = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const CMD_CHAR_UUID    = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const STATUS_CHAR_UUID = "6e400004-b5a3-f393-e0a9-e50e24dcca9e";
+
+const CMD_START = 0x01, CMD_STOP = 0x02, CMD_RESET = 0x03;
+
+// Sensor scale factors — must match ACCEL_CONFIG/GYRO_CONFIG in firmware
+const ACCEL_SENS = 8192.0;  // LSB/g   (+/-4g)
+const GYRO_SENS  = 65.5;    // LSB/(deg/s) (+/-500dps)
+
+let device, dataChar, cmdChar, statusChar;
+let recording = false;
+
+let imuRows = [];     // {epochMs, ax, ay, az, gx, gy, gz}
+let tempRows = [];    // {epochMs, tempC}
+
+let expectedNextIndex = 0;
+let rowsReceived = 0;
+let rowsLost = 0;
+let recordStartEpoch = 0;
+
+const $ = id => document.getElementById(id);
+function log(msg) {
+  const el = $('log');
+  el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateStats() {
+  $('rowsReceived').textContent = rowsReceived.toLocaleString();
+  $('rowsLost').textContent = rowsLost.toLocaleString();
+  $('rowsLost').className = 'val' + (rowsLost > 0 ? ' bad' : '');
+  const total = rowsReceived + rowsLost;
+  const rate = total > 0 ? (rowsLost / total * 100) : 0;
+  $('lossRate').textContent = rate.toFixed(2) + '%';
+  $('lossRate').className = 'val' + (rate > 0.5 ? ' bad' : '');
+}
+
+function setConnected(isConn) {
+  $('connDot').className = isConn ? 'on' : '';
+  $('connStatus').textContent = isConn ? 'Connected' : 'Disconnected';
+  $('btnConnect').textContent = isConn ? 'Disconnect' : 'Connect to IMU';
+  $('btnReset').disabled = !isConn || recording;
+  $('btnStart').disabled = !isConn || recording;
+  $('btnStop').disabled = !isConn || !recording;
+  $('btnDownload').disabled = imuRows.length === 0;
+}
+
+function setRecording(isRec) {
+  recording = isRec;
+  $('recStatus').textContent = isRec ? 'Yes' : 'No';
+  $('recStatus').className = 'val' + (isRec ? ' good' : '');
+  setConnected(true);
+}
+
+// ---------------------------------------------------------------------
+// Connect / disconnect
+// ---------------------------------------------------------------------
+async function connect() {
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    log('Connecting to ' + device.name + ' ...');
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+
+    dataChar = await service.getCharacteristic(DATA_CHAR_UUID);
+    cmdChar = await service.getCharacteristic(CMD_CHAR_UUID);
+    statusChar = await service.getCharacteristic(STATUS_CHAR_UUID);
+
+    await dataChar.startNotifications();
+    dataChar.addEventListener('characteristicvaluechanged', onDataPacket);
+
+    await statusChar.startNotifications();
+    statusChar.addEventListener('characteristicvaluechanged', onStatusPacket);
+
+    log('Connected. Ready to record.');
+    setConnected(true);
+  } catch (err) {
+    log('Connection failed: ' + err);
+  }
+}
+
+function onDisconnected() {
+  log('Device disconnected.');
+  recording = false;
+  setConnected(false);
+}
+
+// ---------------------------------------------------------------------
+// Packet parsing
+//   Data packet:   [uint32 firstSampleIndex][uint8 count]
+//                  + count * (uint32 relMs, int16 ax,ay,az,gx,gy,gz)
+//   Status packet: [uint32 relMs][int16 tempC_x100]
+// ---------------------------------------------------------------------
+function onDataPacket(event) {
+  const view = event.target.value;
+  const firstIndex = view.getUint32(0, true);
+  const count = view.getUint8(4);
+
+  if (firstIndex > expectedNextIndex) {
+    const lost = firstIndex - expectedNextIndex;
+    rowsLost += lost;
+    log(`Gap detected: lost ${lost} row(s) (expected #${expectedNextIndex}, got #${firstIndex})`);
+  }
+
+  let offset = 5;
+  for (let i = 0; i < count; i++) {
+    const relMs = view.getUint32(offset, true);
+    const ax = view.getInt16(offset + 4, true);
+    const ay = view.getInt16(offset + 6, true);
+    const az = view.getInt16(offset + 8, true);
+    const gx = view.getInt16(offset + 10, true);
+    const gy = view.getInt16(offset + 12, true);
+    const gz = view.getInt16(offset + 14, true);
+    offset += 16;
+
+    imuRows.push({
+      epochMs: recordStartEpoch + relMs,
+      ax: ax / ACCEL_SENS, ay: ay / ACCEL_SENS, az: az / ACCEL_SENS,
+      gx: gx / GYRO_SENS,  gy: gy / GYRO_SENS,  gz: gz / GYRO_SENS
+    });
+  }
+
+  rowsReceived += count;
+  expectedNextIndex = firstIndex + count;
+  updateStats();
+  $('btnDownload').disabled = imuRows.length === 0;
+}
+
+function onStatusPacket(event) {
+  const view = event.target.value;
+  const relMs = view.getUint32(0, true);
+  const tempC = view.getInt16(4, true) / 100.0;
+  tempRows.push({ epochMs: recordStartEpoch + relMs, tempC });
+  $('lastTemp').textContent = tempC.toFixed(2) + ' °C';
+  log(`Temperature update: ${tempC.toFixed(2)} °C`);
+}
+
+// ---------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------
+async function startRecording() {
+  recordStartEpoch = Date.now();
+  imuRows = [];
+  tempRows = [];
+  expectedNextIndex = 0;
+  rowsReceived = 0;
+  rowsLost = 0;
+  updateStats();
+
+  await cmdChar.writeValue(new Uint8Array([CMD_START]));
+  setRecording(true);
+  log('Recording started.');
+}
+
+async function stopRecording() {
+  await cmdChar.writeValue(new Uint8Array([CMD_STOP]));
+  setRecording(false);
+  log('Recording stopped.');
+}
+
+async function resetData() {
+  imuRows = [];
+  tempRows = [];
+  expectedNextIndex = 0;
+  rowsReceived = 0;
+  rowsLost = 0;
+  updateStats();
+  $('lastTemp').textContent = '—';
+  if (cmdChar) {
+    try { await cmdChar.writeValue(new Uint8Array([CMD_RESET])); } catch (e) {}
+  }
+  $('btnDownload').disabled = true;
+  log('Data reset.');
+}
+
+function downloadCSV() {
+  const rows = [];
+  rows.push('type,timestamp_iso,timestamp_epoch_ms,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,temp_C');
+
+  const combined = [
+    ...imuRows.map(r => ({ ...r, kind: 'IMU' })),
+    ...tempRows.map(r => ({ ...r, kind: 'TEMP' }))
+  ].sort((a, b) => a.epochMs - b.epochMs);
+
+  for (const r of combined) {
+    const iso = new Date(r.epochMs).toISOString();
+    if (r.kind === 'IMU') {
+      rows.push(`IMU,${iso},${r.epochMs},${r.ax.toFixed(5)},${r.ay.toFixed(5)},${r.az.toFixed(5)},${r.gx.toFixed(3)},${r.gy.toFixed(3)},${r.gz.toFixed(3)},`);
+    } else {
+      rows.push(`TEMP,${iso},${r.epochMs},,,,,,,${r.tempC.toFixed(2)}`);
+    }
+  }
+
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `imu_data_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  log(`Downloaded CSV: ${imuRows.length} IMU rows, ${tempRows.length} temp rows.`);
+}
+
+// ---------------------------------------------------------------------
+// Wire up buttons
+// ---------------------------------------------------------------------
+$('btnConnect').addEventListener('click', () => {
+  if (device && device.gatt.connected) {
+    device.gatt.disconnect();
+  } else {
+    connect();
+  }
+});
+$('btnStart').addEventListener('click', startRecording);
+$('btnStop').addEventListener('click', stopRecording);
+$('btnReset').addEventListener('click', resetData);
+$('btnDownload').addEventListener('click', downloadCSV);
+
+if (!navigator.bluetooth) {
+  log('Web Bluetooth is not available in this browser. Use Chrome or Edge on desktop/Android.');
+  $('btnConnect').disabled = true;
+}
+</script>
+</body>
+</html>
